@@ -1,0 +1,520 @@
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <string>
+
+#define Depot_Time 180       //在depot处理所需时间
+#define MAX_DEFAULT 10000000
+
+using namespace std;
+
+/*仓库相关参数*/
+int no_aisles;      //走道数量
+int no_cells;       //每一列所包含的存放点数量
+double cell_length; //存放点的长度
+double cell_width;  //存放点的宽度
+double aisle_width; //走道宽度
+double dis_depot_aisle; //depot距离前走道的距离
+double speed_move;  //取货车的移动速度 每100秒走的距离
+double speed_pick;   //工人取货的速度  秒    
+int pick_capicaty;   //取货车的装载量
+int no_Orders = 0;
+int count_batches = 0;
+double warehouse_length = 0;
+double warehouse_width = 0;
+/*item的数据结构*/
+struct Item {
+	int location;
+	int aisle;
+	Item * next;
+};
+/*订单的数据结构*/
+struct Order {
+	int ID;
+	double due_date;
+	int count_items;             //对于头结点 就是存储该批次的总item的数量 对于order节点就是记录改order所包含的item数量
+	double routing_time;         //邻接表的头结点用来记录路线规划的时间  order-不使用该字段
+	Item * next_item;
+	Order * next_order;
+	bool related_tardiness;
+};
+
+Order * order_head;   //订单链表表头    需要在初始化的时候给其赋值
+Order * solution;     //解的指针
+
+/* 字符串读取时 需要调用到的一个剥离函数  */
+void split(const string& src, const string& delim, vector<string>& dest);
+
+void init_order_node(Order * order);
+void init_order_node(Order * order, int id, double due_date, int count_items, double routing_time, bool related_tardiness);
+
+/* ---读取实例文件 初始化仓库、订单信息、以及用EDD得到初始解 ---*/
+void initOBSP();
+
+/*---  将解solution中的第j_batches批次中的ID为i_order的订单插入到第k_batches里面---*/
+void insert(Order * solution, int i_order, int j_batches, int k_batches);
+
+/*打印solution的相关信息*/
+void print_solution(Order * solution);
+
+/*---s形的路线所耗时间---*/
+double routing_s_shape(Order * solution, int i_batches);
+
+/*    目标函数 objective function    -- 评估解的惩罚大小 */
+double objective_func(Order * solution);
+
+/*  -- solution_copy  这个是在后面的局部搜索中需要对解进行一个copy 对复制版本进行邻域动作--  */
+Order * solution_copy(Order * solution);
+
+/* LS -- 目的是得到一个最优解 */
+Order * Local_Search_Insert(Order * solution);
+/* LS里面的一个辅助函数 判断当前延迟相关的Order被插入到哪里目标函数值会有所减小 */
+int improve_order_insert(Order * order, int loc_batch, Order * copy_solution, double tardiness);
+
+
+void main() {
+	initOBSP();
+	print_solution(solution);
+
+	double tardiness = objective_func(solution);
+	Order * s = Local_Search_Insert(solution);
+	double temp = objective_func(s);
+	print_solution(s);
+
+
+	cout << "tardiness--before optimized  :  " << tardiness << endl;
+	cout << "tardiness--after optimized  :" << temp << endl;
+	
+
+
+
+	system("pause");
+}
+
+void split(const string& src, const string& delim, vector<string>& dest) {
+	dest.clear();
+	string str = src;
+	string::size_type start = 0, index;
+	string substr;
+	index = str.find(delim, start);
+	while (index != string::npos) {
+		substr = str.substr(start, index - start);
+		dest.push_back(substr);
+		start = index + 1;
+		index = str.find(delim, start);
+	}
+	substr = str.substr(start, index);
+	dest.push_back(substr);
+}
+
+/*  format 
+	batch i  capacity  c  routing_time  t  order   o1  o2  o3 
+*/
+void print_solution(Order * solution) {
+	cout << "count_batches : " << count_batches << endl;
+	Order * p_order = NULL;
+	for (int i = 0; i < count_batches; i++) {
+		cout << "batches :" << i << "   batch_capacity :  " << solution[i].count_items << "  routing_time  :"<<solution[i].routing_time<< "   Order :  ";
+		p_order = (solution + i)->next_order;
+		while (p_order) {
+			int temp2 = p_order->related_tardiness ? 1 : 0;
+			//cout << p_order->ID << "  "<<"improved "<<temp1<< "  related_tardiness: "<<temp2<<endl;
+			cout << p_order->ID << "  ";
+			p_order = p_order->next_order;
+		}
+		cout << endl;
+	}
+	cout << endl << endl;
+}
+
+void init_order_node(Order * order) {
+	order->count_items = 0;
+	order->due_date = 0;
+	order->ID = MAX_DEFAULT;
+	order->related_tardiness = false;
+	order->next_item = NULL;
+	order->next_order = NULL;
+	return;
+}
+
+void init_order_node(Order * order, int id, double due_date, int count_items, double routing_time, bool related_tardiness) {
+	order->ID = id;
+	order->due_date = due_date;
+	order->count_items = count_items;
+	order->routing_time = routing_time;
+	order->related_tardiness = related_tardiness;
+	
+	return;
+}
+
+
+void initOBSP() {
+	ifstream readFile("E:\\LearningSpace\\订单分批和排序问题\\obsp_instances\\obsp_instances\\MTCR_05_06_07\\sett3.txt", ios::in);
+	string textline;
+	string delim(" ");
+	vector<string> data;
+	if (readFile.good()) {
+		while (!readFile.fail()) {
+			getline(readFile, textline);
+			split(textline, delim, data);
+			if (data[0] == "no_aisles_:") {
+				no_aisles = stoi(data[1]);
+			}
+			else if (data[0] == "no_cells__:") {
+				no_cells = stoi(data[1]);
+			}
+			else if (data[0] == "cell_lengt:") {
+				cell_length = stod(data[1]);
+			}
+			else if (data[0] == "cell_width:") {
+				cell_width = stod(data[1]);
+			}
+			else if (data[0] == "aisle_widt:") {
+				aisle_width = stod(data[1]);
+			}
+			else if (data[0] == "dis_ais_wa:") {
+				dis_depot_aisle = stod(data[1]);
+			}
+			else if (data[0] == "speed_move:") {
+				speed_move = stod(data[1]);
+			}
+			else if (data[0] == "speed_pick:") {
+				speed_pick = stod(data[1]);
+			}
+			else if (data[0] == "m_no_a_p_b:") {
+				pick_capicaty = stoi(data[1]);
+			}
+		}
+	}
+
+	warehouse_length = no_cells * cell_length;
+	warehouse_width = no_aisles * (aisle_width + 2 * cell_width);
+	
+	readFile.close();
+	/*至此仓库相关数据全部读取完毕*/
+
+	ifstream readOrderFile("E:\\LearningSpace\\订单分批和排序问题\\obsp_instances\\obsp_instances\\MTCR_05_06_07\\3l-20-45-0.txt", ios::in);
+	
+	Order * order = NULL;
+	if (readOrderFile.good()) {
+		while (!readOrderFile.fail()) {
+			getline(readOrderFile, textline);
+			split(textline, delim, data);
+			if (textline.empty()) {
+				break;
+			}
+			if (data[0].find("O") == 0) {
+				++no_Orders;
+				if (order_head == NULL) {
+					order_head = new Order();
+					init_order_node(order_head);
+				}
+				order = new Order();
+				init_order_node(order, stoi(data[1]), stoi(data[6]), stoi(data[4]), 0, false);
+				order->next_item = NULL;
+				order->next_order = NULL;
+
+				Order *p, *q;
+				q = order_head;
+				p = q->next_order;
+				while (p) {
+					if (p->due_date > order->due_date)
+						break;
+					else {
+						q = p;
+						p = p->next_order;
+					}
+				}
+				order->next_order = p;
+				q->next_order = order;
+			}
+			else {
+				Item * item = new Item();
+				item->aisle = stoi(data[1]);
+				item->location = stoi(data[2]);
+				item->next = order->next_item;
+				order->next_item = item;
+			}
+		}
+	}
+
+
+
+	///* EDD 产生初始解 */
+	int i_batches = 0; 
+	int count_weight = 0;
+	solution = new Order[no_Orders];
+	for (i_batches = 0; i_batches < no_Orders; i_batches++) {
+		solution[i_batches].count_items = 0;
+		solution[i_batches].due_date = MAX_DEFAULT;
+		solution[i_batches].next_item = NULL;
+		solution[i_batches].next_order = NULL;
+		solution[i_batches].ID = MAX_DEFAULT;
+		solution[i_batches].routing_time = 0;
+		solution[i_batches].related_tardiness = false;
+	}
+
+	Order * p = order_head->next_order;
+	i_batches = 0;
+	/*
+	while (p) {
+		if (pick_capicaty > count_weight + p->count_items) {
+			Order * order_p = new Order();
+			init_order_node(order_p, p->ID, p->due_date, p->count_items, p->routing_time, p->related_tardiness);
+			order->next_item = p->next_item;
+			order->next_order = NULL;
+
+			order_p->next_order = solution[i_batches].next_order;
+			solution[i_batches].next_order = order_p;
+			solution[i_batches].count_items += p->count_items;
+			count_weight += p->count_items;
+			p = p->next_order;
+		}
+		else {
+			count_weight = 0;
+			i_batches++;
+		}
+	}*/
+	while (p) {
+		if (pick_capicaty > count_weight + p->count_items) {
+			Order * order_p = new Order();
+			order_p->count_items = p->count_items;
+			order_p->due_date = p->due_date;
+			order_p->ID = p->ID;
+			order_p->next_item = p->next_item;
+			order_p->next_order = NULL;
+			order_p->related_tardiness = p->related_tardiness;
+
+			order_p->next_order = solution[i_batches].next_order;
+			solution[i_batches].next_order = order_p;
+			solution[i_batches].count_items += p->count_items;
+			count_weight += p->count_items;
+			p = p->next_order;
+		}
+		else {
+			i_batches++;
+			count_weight = 0;
+		}
+
+	}
+
+	count_batches = ++i_batches;
+}
+
+
+void insert(Order * solution, int i_order, int j_batches, int k_batches) {
+	Order * p = (solution + j_batches)->next_order;
+	Order * q = (solution + j_batches);
+	while (p) {
+		if (p->ID == i_order)
+			break;
+		q = p;
+		p = p->next_order;
+	}
+	if (!p) {
+		return;
+	}
+	else {
+		solution[j_batches].count_items -= p->count_items;
+		solution[k_batches].count_items += p->count_items;
+		q->next_order = p->next_order;
+		p->next_order = (solution + k_batches)->next_order;
+		solution[k_batches].next_order = p;
+	}
+	return;
+}
+
+/*返回时间单位  second */
+double routing_s_shape(Order * solution, int i_batches) {
+	
+	if (!solution[i_batches].next_order) {
+		return 0;
+	}
+	int all_items = 0;
+	double time = 0;
+	double distance = 0;
+	int * aisles = new int[no_aisles] {0};
+	int count_travial_aisles = 0;
+	Order * p_order = (solution + i_batches)->next_order;
+	/*1.遍历搜索item的总量；
+	2.判断有哪些aisle是需要遍历的
+	*/
+	while (p_order) {
+		all_items += p_order->count_items;
+		Item * q_item = p_order->next_item;
+		while (q_item) {
+			int temp = q_item->aisle / 2;
+			aisles[temp]++;
+			q_item = q_item->next;
+		}
+		p_order = p_order->next_order;
+	}
+	/*--先计算出了收集货物一共花费的时间  没有计算在路上走的时间--*/
+	time += all_items * speed_pick;
+	//cout << "all_items  " << all_items << "  time  "<<time<<endl;
+
+	int last_aisle = 0;       //记录最后一个需要遍历的过道
+	for (int i = 0; i < no_aisles; i++) {
+		if (aisles[i] != 0) {
+			count_travial_aisles++;
+			last_aisle = i;
+		}
+	}
+
+	//cout << "countAisles = " << count_travial_aisles << endl;
+
+	double warehouse_length = no_cells * cell_length;
+	double warehouse_width = (last_aisle + 1) * aisle_width + last_aisle * 2 * cell_width;
+	if (count_travial_aisles % 2 == 0) {
+		distance += warehouse_length * count_travial_aisles + 2 * warehouse_width;
+	}
+	else {
+		distance += warehouse_length * (count_travial_aisles + 1) + 2 * warehouse_width;
+	}
+	distance += 2 * dis_depot_aisle;
+
+	time += distance * 100 / speed_move;
+
+	//cout << "distance  " << distance << "  time  " << time << endl;
+
+	time += Depot_Time;
+
+	return time;
+}
+
+/*这一个需要全部进行一次routing*/
+double objective_func(Order * solution) {
+	double tardiness = 0;               //记录解的总惩罚
+	double batch_end_time = 0;        //记录每个批次的结束时间
+	for (int i = 0; i < count_batches; i++) {
+		double routing_time= routing_s_shape(solution, i);
+		solution[i].routing_time = routing_time;
+		batch_end_time += routing_time;
+		//cout << "batch_i : "<<i <<"  batch_end_time :" << batch_end_time <<endl;         //目前单位全是  second 
+		Order * batch_p = solution[i].next_order;
+		while (batch_p) {
+
+			double second_due_date = batch_p->due_date * 60;
+			if (batch_end_time > second_due_date) {
+				tardiness += batch_end_time - second_due_date;
+				batch_p->related_tardiness = true;
+			}
+			else {
+				batch_p->related_tardiness = false;
+			}
+			double temp = (batch_end_time - second_due_date) > 0 ? (batch_end_time - second_due_date) : 0;
+			//cout <<"order ID : "<<batch_p->ID<<"   due_date  "<< batch_p->due_date*60 <<"   "<< temp << endl;
+
+			batch_p = batch_p->next_order;
+		}
+	}
+	return tardiness / 60;
+}
+
+double objective_func(Order * solution, int batch_i, int batch_j) {
+	double routing_time_i = routing_s_shape(solution, batch_i);
+	double routing_time_j = routing_s_shape(solution, batch_j);
+	solution[batch_i].routing_time = routing_time_i;
+	solution[batch_j].routing_time = routing_time_j;
+
+	double count_time = 0;
+	double tardiness = 0;
+	for (int i = 0; i < count_batches; i++) {
+		Order * p = solution[i].next_order;
+		count_time += solution[i].routing_time;
+		while (p) {
+			double second_due_date = p->due_date + 60;
+			if (second_due_date < count_time) {
+				tardiness += count_time - second_due_date;
+				p->related_tardiness = true;
+			}
+			p = p->next_order;
+		}
+	}
+	return tardiness / 60;
+}
+
+Order * solution_copy(Order * solution) {
+	auto solution_copy = new Order[count_batches]{ NULL };
+	for (int i = 0; i < count_batches; i++) {
+		solution_copy[i].count_items = MAX_DEFAULT;
+		solution_copy[i].due_date = MAX_DEFAULT;
+		solution_copy[i].next_item = NULL;
+		solution_copy[i].next_order = NULL;
+		solution_copy[i].count_items = solution[i].count_items;
+		solution_copy[i].routing_time = solution[i].routing_time;
+	}
+	for (int i = 0; i < count_batches; i++) {
+		Order * p_order = solution[i].next_order;
+		if (!p_order) {
+			continue;
+		}
+		Order * s_c_order = new Order();
+		s_c_order->count_items = p_order->count_items;
+		s_c_order->due_date = p_order->due_date;
+		s_c_order->ID = p_order->ID;
+		s_c_order->next_item = p_order->next_item;
+		s_c_order->next_order = NULL;
+		s_c_order->related_tardiness = p_order->related_tardiness;
+		solution_copy[i].next_order = s_c_order;
+		p_order = p_order->next_order;
+		while (p_order) {
+			Order * s_c_p_order = new Order();
+			s_c_p_order->count_items = p_order->count_items;
+			s_c_p_order->due_date = p_order->due_date;
+			s_c_p_order->ID = p_order->ID;
+			s_c_p_order->next_item = p_order->next_item;
+			s_c_p_order->next_order = NULL;
+			s_c_order->related_tardiness = p_order->related_tardiness;
+			s_c_order->next_order = s_c_p_order;
+			s_c_order = s_c_order->next_order;
+			p_order = p_order->next_order;
+		}
+	}
+	return solution_copy;
+}
+
+Order * Local_Search_Insert(Order * solution) {
+	double tardiness = 0;
+
+	for (int i = 0; i < count_batches; i++) {
+		Order * p = solution[i].next_order;
+
+		while (p) {
+			if (p->related_tardiness) {
+				//cout << endl << "what is wrong here?" << endl;
+				Order * copy_solution = solution_copy(solution);
+				tardiness = objective_func(solution);
+				int temp = improve_order_insert(p, i, copy_solution, tardiness);
+				//cout << "batch :" << i << "  order->ID :" << p->ID << "  tardiness :" << tardiness << endl;
+				if (temp > 0) {
+					solution = copy_solution;
+				}
+			}
+			p = p->next_order;
+		}
+
+	}
+	return solution;
+}
+
+int improve_order_insert(Order * order, int loc_batch, Order * copy_solution, double tardiness) {
+	double tardiness_temp = 0;
+	int i = 0;
+	for (i = 0; i < count_batches; i++) {
+		//cout <<endl<<endl<<endl <<" improve_order   "<< "batch_capacity : " << copy_solution[i].count_batch_capacity << endl;
+		if (i == loc_batch || copy_solution[i].count_items + order->count_items > pick_capicaty) {
+			continue;
+		}
+		insert(copy_solution, order->ID, loc_batch, i);
+		tardiness_temp = objective_func(copy_solution);
+		if (tardiness > tardiness_temp) {
+			cout << "insert  order" << order->ID << " from " << loc_batch << "batch to " << i << " batch " << endl;
+			break;
+		}
+		else {
+			insert(copy_solution, order->ID, i, loc_batch);
+		}
+	}
+	return i == count_batches ? -1 : i;
+}
